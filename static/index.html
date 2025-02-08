@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebSocket Transcription Test</title>
+</head>
+<body>
+    <h1>WebSocket Transcription Test</h1>
+    <button id="start-btn">Start Recording</button>
+    <button id="stop-btn" disabled>Stop Recording</button>
+    <div id="output" style="margin-top:1em; border:1px solid #ccc; padding:0.5em;"></div>
+
+    <script>
+        let ws;
+        let audioStream;
+        let audioContext, source, scriptProcessor;
+
+        const output = document.getElementById("output");
+
+        function appendMessage(message) {
+            const msgElem = document.createElement("div");
+            msgElem.textContent = message;
+            output.appendChild(msgElem);
+        }
+
+        document.getElementById("start-btn").addEventListener("click", async () => {
+            // Connect to your WebSocket endpoint
+            ws = new WebSocket("ws://localhost:8000/ws/transcribe");
+            ws.binaryType = "arraybuffer";
+
+            ws.onopen = async () => {
+                appendMessage("WebSocket connected.");
+                try {
+                    // Request microphone access with constraints for mono audio.
+                    // Note: sampleRate in constraints can be advisory; actual rate is determined by the device.
+                    audioStream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: { sampleRate: 16000, channelCount: 1 } 
+                    });
+                } catch (err) {
+                    appendMessage("Error accessing microphone: " + err);
+                    return;
+                }
+
+                // Create an AudioContext. You can hint at sampleRate=16000, but many browsers might not honor it.
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                source = audioContext.createMediaStreamSource(audioStream);
+
+                // Use a ScriptProcessorNode to capture raw PCM data.
+                // The buffer size (e.g., 4096) will determine the chunk size.
+                scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+                source.connect(scriptProcessor);
+                // Connecting to destination is optional; if you do, you'll hear the audio.
+                scriptProcessor.connect(audioContext.destination);
+
+                scriptProcessor.onaudioprocess = (event) => {
+                    const inputBuffer = event.inputBuffer;
+                    const channelData = inputBuffer.getChannelData(0);
+                    
+                    // Convert Float32Array [-1.0, 1.0] to 16-bit PCM (littleEndian)
+                    const buffer = new ArrayBuffer(channelData.length * 2);
+                    const dataView = new DataView(buffer);
+                    for (let i = 0; i < channelData.length; i++) {
+                        let sample = channelData[i];
+                        // Clamp the sample
+                        sample = Math.max(-1, Math.min(1, sample));
+                        // Scale float to 16-bit signed integer range
+                        dataView.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                    }
+                    // Send the raw PCM chunk to the server
+                    ws.send(buffer);
+                };
+
+                appendMessage("Recording started.");
+                document.getElementById("start-btn").disabled = true;
+                document.getElementById("stop-btn").disabled = false;
+            };
+
+            ws.onmessage = (event) => {
+                appendMessage("Received: " + event.data);
+            };
+
+            ws.onerror = (event) => {
+                appendMessage("WebSocket error occurred.");
+            };
+
+            ws.onclose = () => {
+                appendMessage("WebSocket connection closed.");
+                document.getElementById("start-btn").disabled = false;
+                document.getElementById("stop-btn").disabled = true;
+            };
+        });
+
+        document.getElementById("stop-btn").addEventListener("click", () => {
+            // Disconnect the script processor and stop the audio stream.
+            if (scriptProcessor) {
+                scriptProcessor.disconnect();
+            }
+            if (source) {
+                source.disconnect();
+            }
+            if (audioContext) {
+                audioContext.close();
+            }
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+            }
+            // Signal the server that no more audio will be sent.
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send("CHUNKS_DONE");
+            }
+            appendMessage("Recording stopped.");
+        });
+    </script>
+</body>
+</html>
