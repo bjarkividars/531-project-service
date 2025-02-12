@@ -3,12 +3,63 @@
 <head>
     <meta charset="utf-8">
     <title>WebSocket Transcription Test</title>
+    <style>
+        .button-container {
+            margin: 1em 0;
+        }
+        .button-container button {
+            margin-right: 1em;
+            padding: 0.5em 1em;
+        }
+        #output {
+            margin-top: 1em;
+            border: 1px solid #ccc;
+            padding: 1em;
+            min-height: 200px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .final-text {
+            color: #2c5282;
+            font-weight: bold;
+        }
+        .partial-text {
+            color: #718096;
+            font-style: italic;
+        }
+        .analysis {
+            margin-top: 1em;
+            padding: 1em;
+            background-color: #f7fafc;
+            border-left: 4px solid #4299e1;
+            border-radius: 4px;
+        }
+        .analysis-header {
+            color: #2b6cb0;
+            font-weight: bold;
+            margin-bottom: 0.5em;
+        }
+        .section {
+            margin: 1em 0;
+            padding: 1em;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+        }
+        .section-header {
+            font-weight: bold;
+            color: #2d3748;
+            margin-bottom: 0.5em;
+        }
+    </style>
 </head>
 <body>
     <h1>WebSocket Transcription Test</h1>
-    <button id="start-btn">Start Recording</button>
-    <button id="stop-btn" disabled>Stop Recording</button>
-    <div id="output" style="margin-top:1em; border:1px solid #ccc; padding:0.5em;"></div>
+    <div class="button-container">
+        <button id="start-btn">Start Recording</button>
+        <button id="stop-discard-btn" disabled>Stop & Discard</button>
+        <button id="stop-process-btn" disabled>Stop & Process</button>
+    </div>
+    <div id="output"></div>
 
     <script>
         let ws;
@@ -16,82 +67,34 @@
         let audioContext, source, scriptProcessor;
 
         const output = document.getElementById("output");
+        const startBtn = document.getElementById("start-btn");
+        const stopDiscardBtn = document.getElementById("stop-discard-btn");
+        const stopProcessBtn = document.getElementById("stop-process-btn");
 
-        function appendMessage(message) {
-            const msgElem = document.createElement("div");
-            msgElem.textContent = message;
-            output.appendChild(msgElem);
+        function appendMessage(message, className = '', isSection = false) {
+            const container = isSection ? document.createElement("div") : document.createElement("div");
+            if (isSection) {
+                container.className = 'section';
+                const header = document.createElement("div");
+                header.className = 'section-header';
+                header.textContent = message.split(':')[0] + ':';
+                container.appendChild(header);
+                
+                const content = document.createElement("div");
+                content.textContent = message.split(':').slice(1).join(':').trim();
+                container.appendChild(content);
+            } else {
+                container.textContent = message;
+                if (className) {
+                    container.className = className;
+                }
+            }
+            output.appendChild(container);
+            output.scrollTop = output.scrollHeight;
         }
 
-        document.getElementById("start-btn").addEventListener("click", async () => {
-            // Connect to your WebSocket endpoint
-            ws = new WebSocket("ws://localhost:8000/ws/transcribe");
-            ws.binaryType = "arraybuffer";
-
-            ws.onopen = async () => {
-                appendMessage("WebSocket connected.");
-                try {
-                    // Request microphone access with constraints for mono audio.
-                    // Note: sampleRate in constraints can be advisory; actual rate is determined by the device.
-                    audioStream = await navigator.mediaDevices.getUserMedia({ 
-                        audio: { sampleRate: 16000, channelCount: 1 } 
-                    });
-                } catch (err) {
-                    appendMessage("Error accessing microphone: " + err);
-                    return;
-                }
-
-                // Create an AudioContext. You can hint at sampleRate=16000, but many browsers might not honor it.
-                audioContext = new AudioContext({ sampleRate: 16000 });
-                source = audioContext.createMediaStreamSource(audioStream);
-
-                // Use a ScriptProcessorNode to capture raw PCM data.
-                // The buffer size (e.g., 4096) will determine the chunk size.
-                scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-                source.connect(scriptProcessor);
-                // Connecting to destination is optional; if you do, you'll hear the audio.
-                scriptProcessor.connect(audioContext.destination);
-
-                scriptProcessor.onaudioprocess = (event) => {
-                    const inputBuffer = event.inputBuffer;
-                    const channelData = inputBuffer.getChannelData(0);
-                    
-                    // Convert Float32Array [-1.0, 1.0] to 16-bit PCM (littleEndian)
-                    const buffer = new ArrayBuffer(channelData.length * 2);
-                    const dataView = new DataView(buffer);
-                    for (let i = 0; i < channelData.length; i++) {
-                        let sample = channelData[i];
-                        // Clamp the sample
-                        sample = Math.max(-1, Math.min(1, sample));
-                        // Scale float to 16-bit signed integer range
-                        dataView.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
-                    }
-                    // Send the raw PCM chunk to the server
-                    ws.send(buffer);
-                };
-
-                appendMessage("Recording started.");
-                document.getElementById("start-btn").disabled = true;
-                document.getElementById("stop-btn").disabled = false;
-            };
-
-            ws.onmessage = (event) => {
-                appendMessage("Received: " + event.data);
-            };
-
-            ws.onerror = (event) => {
-                appendMessage("WebSocket error occurred.");
-            };
-
-            ws.onclose = () => {
-                appendMessage("WebSocket connection closed.");
-                document.getElementById("start-btn").disabled = false;
-                document.getElementById("stop-btn").disabled = true;
-            };
-        });
-
-        document.getElementById("stop-btn").addEventListener("click", () => {
-            // Disconnect the script processor and stop the audio stream.
+        function stopRecording(command) {
+            // Disconnect the script processor and stop the audio stream
             if (scriptProcessor) {
                 scriptProcessor.disconnect();
             }
@@ -104,11 +107,104 @@
             if (audioStream) {
                 audioStream.getTracks().forEach(track => track.stop());
             }
-            // Signal the server that no more audio will be sent.
+            // Send the appropriate stop command
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send("CHUNKS_DONE");
+                ws.send(command);
             }
-            appendMessage("Recording stopped.");
+            
+            // Update button states
+            startBtn.disabled = false;
+            stopDiscardBtn.disabled = true;
+            stopProcessBtn.disabled = true;
+            
+            appendMessage(`Recording stopped with ${command}`);
+        }
+
+        startBtn.addEventListener("click", async () => {
+            output.innerHTML = ''; // Clear previous output
+            
+            if (!navigator.mediaDevices) {
+                appendMessage("mediaDevices is not available in this browser/context");
+                return;
+            }
+            
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/transcribe`;
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = "arraybuffer";
+
+            ws.onopen = async () => {
+                appendMessage("WebSocket connected.");
+                try {
+                    audioStream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: { sampleRate: 16000, channelCount: 1 } 
+                    });
+                } catch (err) {
+                    appendMessage("Error accessing microphone: " + err);
+                    return;
+                }
+
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                source = audioContext.createMediaStreamSource(audioStream);
+                scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+                source.connect(scriptProcessor);
+                scriptProcessor.connect(audioContext.destination);
+
+                scriptProcessor.onaudioprocess = (event) => {
+                    const inputBuffer = event.inputBuffer;
+                    const channelData = inputBuffer.getChannelData(0);
+                    
+                    const buffer = new ArrayBuffer(channelData.length * 2);
+                    const dataView = new DataView(buffer);
+                    for (let i = 0; i < channelData.length; i++) {
+                        let sample = channelData[i];
+                        sample = Math.max(-1, Math.min(1, sample));
+                        dataView.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                    }
+                    ws.send(buffer);
+                };
+
+                appendMessage("Recording started.");
+                startBtn.disabled = true;
+                stopDiscardBtn.disabled = false;
+                stopProcessBtn.disabled = false;
+            };
+
+            ws.onmessage = (event) => {
+                const message = event.data;
+                if (message.startsWith("PARTIAL: ")) {
+                    appendMessage(message.substring(9), 'partial-text');
+                } else if (message.startsWith("FINAL: ")) {
+                    appendMessage(message.substring(7), 'final-text');
+                } else if (message.startsWith("COMPLETE_TRANSCRIPTION: ")) {
+                    appendMessage("Transcription Result", 'section-header');
+                    appendMessage(message.substring(23), 'final-text', true);
+                } else if (message.startsWith("ANALYSIS: ")) {
+                    appendMessage("Gemini Analysis", 'section-header');
+                    appendMessage(message.substring(10), 'analysis', true);
+                } else {
+                    appendMessage(message);
+                }
+            };
+
+            ws.onerror = (event) => {
+                appendMessage("WebSocket error occurred.");
+            };
+
+            ws.onclose = () => {
+                appendMessage("WebSocket connection closed.");
+                startBtn.disabled = false;
+                stopDiscardBtn.disabled = true;
+                stopProcessBtn.disabled = true;
+            };
+        });
+
+        stopDiscardBtn.addEventListener("click", () => {
+            stopRecording("STOP_DISCARD");
+        });
+
+        stopProcessBtn.addEventListener("click", () => {
+            stopRecording("STOP_PROCESS");
         });
     </script>
 </body>
