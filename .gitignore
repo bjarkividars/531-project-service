@@ -34,3 +34,5 @@ ENV/
 .DS_Store 
 
 .env
+
+knowledge/

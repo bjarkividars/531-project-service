@@ -17,10 +17,6 @@ speech_config = speechsdk.SpeechConfig(
     region="eastus"
 )
 
-# Configure Gemini
-genai.configure(api_key=settings.gemini_api_key)
-model = genai.GenerativeModel('gemini-2.0-flash')
-
 class TranscriptionResult:
     def __init__(self):
         self.final_outputs: List[str] = []
