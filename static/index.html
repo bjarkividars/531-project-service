@@ -50,6 +50,11 @@
             color: #2d3748;
             margin-bottom: 0.5em;
         }
+        .audio-status {
+            color: #4a5568;
+            font-style: italic;
+            margin-top: 0.5em;
+        }
     </style>
 </head>
 <body>
@@ -65,6 +70,10 @@
         let ws;
         let audioStream;
         let audioContext, source, scriptProcessor;
+        let audioPlayer = new Audio();
+        let audioQueue = [];
+        let isPlayingResponse = false;
+        let audioBlobs = []; // Array to store audio blobs for concatenation
 
         const output = document.getElementById("output");
         const startBtn = document.getElementById("start-btn");
@@ -120,8 +129,55 @@
             appendMessage(`Recording stopped with ${command}`);
         }
 
+        async function playNextAudioChunk() {
+            if (audioQueue.length > 0 && !isPlayingResponse) {
+                isPlayingResponse = true;
+                
+                // Concatenate all available chunks into a single blob
+                const chunks = [];
+                while (audioQueue.length > 0) {
+                    chunks.push(audioQueue.shift());
+                }
+                
+                const blob = new Blob(chunks, { type: 'audio/mp3' });
+                audioBlobs.push(blob);
+                
+                // Create URL for the blob
+                const audioUrl = URL.createObjectURL(blob);
+                audioPlayer.src = audioUrl;
+                
+                try {
+                    console.log('Starting audio playback...');
+                    await audioPlayer.play();
+                    appendMessage("Playing assistant's response...", 'audio-status');
+                } catch (error) {
+                    console.error('Error playing audio:', error);
+                    isPlayingResponse = false;
+                    URL.revokeObjectURL(audioUrl);
+                }
+            }
+        }
+
+        audioPlayer.onended = () => {
+            console.log('Audio chunk finished playing');
+            URL.revokeObjectURL(audioPlayer.src);
+            isPlayingResponse = false;
+            
+            // If we have more chunks in the queue, play them
+            if (audioQueue.length > 0) {
+                playNextAudioChunk();
+            } else if (audioBlobs.length > 0) {
+                // Create a final concatenated audio file when all chunks are received
+                const finalBlob = new Blob(audioBlobs, { type: 'audio/mp3' });
+                console.log('Created final audio blob:', finalBlob.size, 'bytes');
+                audioBlobs = []; // Clear the blobs array
+            }
+        };
+
         startBtn.addEventListener("click", async () => {
             output.innerHTML = ''; // Clear previous output
+            audioQueue = []; // Clear audio queue
+            audioBlobs = []; // Clear audio blobs
             
             if (!navigator.mediaDevices) {
                 appendMessage("mediaDevices is not available in this browser/context");
@@ -131,7 +187,7 @@
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws/transcribe`;
             ws = new WebSocket(wsUrl);
-            ws.binaryType = "arraybuffer";
+            ws.binaryType = "arraybuffer";  // Ensure we're receiving binary data as ArrayBuffer
 
             ws.onopen = async () => {
                 appendMessage("WebSocket connected.");
@@ -171,19 +227,26 @@
             };
 
             ws.onmessage = (event) => {
-                const message = event.data;
-                if (message.startsWith("PARTIAL: ")) {
-                    appendMessage(message.substring(9), 'partial-text');
-                } else if (message.startsWith("FINAL: ")) {
-                    appendMessage(message.substring(7), 'final-text');
-                } else if (message.startsWith("COMPLETE_TRANSCRIPTION: ")) {
-                    appendMessage("Transcription Result", 'section-header');
-                    appendMessage(message.substring(23), 'final-text', true);
-                } else if (message.startsWith("ANALYSIS: ")) {
-                    appendMessage("Gemini Analysis", 'section-header');
-                    appendMessage(message.substring(10), 'analysis', true);
+                console.log('received message', event.data)
+                if (event.data instanceof ArrayBuffer) {
+                    console.log('Received audio chunk:', event.data.byteLength, 'bytes');
+                    // Handle audio data from assistant
+                    audioQueue.push(event.data);
+                    playNextAudioChunk();
                 } else {
-                    appendMessage(message);
+                    const message = event.data;
+                    if (message.startsWith("PARTIAL: ")) {
+                        appendMessage(message.substring(9), 'partial-text');
+                    } else if (message.startsWith("FINAL: ")) {
+                        appendMessage(message.substring(7), 'final-text');
+                    } else if (message.startsWith("COMPLETE_TRANSCRIPTION: ")) {
+                        appendMessage("Transcription Result", 'section-header');
+                        appendMessage(message.substring(23), 'final-text', true);
+                    } else if (message === "RESPONSE_COMPLETE") {
+                        appendMessage("Assistant's response complete", 'audio-status');
+                    } else {
+                        appendMessage(message);
+                    }
                 }
             };
 
